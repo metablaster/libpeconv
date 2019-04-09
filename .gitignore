@@ -1,0 +1,77 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+*.iobj
+
+# Precompiled Headers
+*.gch
+*.pch
+*.ipch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+*.dll
+
+# Visual Studio Files
+*.suo
+*.filters
+*.user
+
+# Visual Studio database files
+*.db
+*.db-shm
+*.db-wal
+*.opendb
+*.idb
+*.pdb
+*.ipdb
+
+# Visual Studio log files
+*.log
+*.tlog
+*.lastbuildstate
+#*.txt
+
+# Visual Studio linker files
+*.ilk
+
+# Compiled Resource files
+*.res
+*.aps
+
+# Visual Studio browse files
+*.sbr
+*.bsc
+
+#Visual Studio upgrade files
+*.htm
+*.html
+
+# Build Directories
+Debug/
+Release/
+
+#Visual studio settings
+.vs/
