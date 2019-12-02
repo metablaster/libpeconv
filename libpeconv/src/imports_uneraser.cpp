@@ -19,12 +19,8 @@ LPVOID search_name(std::string name, const char* modulePtr, size_t moduleSize)
     return NULL;
 }
 
-bool ImportsUneraser::writeFoundDllName(IMAGE_IMPORT_DESCRIPTOR* lib_desc, std::string found_name)
+bool ImportsUneraser::writeFoundDllName(IMAGE_IMPORT_DESCRIPTOR* lib_desc, const std::string &found_name)
 {
-    if (found_name.find_last_of(".")  >= found_name.length()) {
-        //if no extension found, append extension DLL
-        found_name += ".dll"; //TODO: it not always has to have extension DLL!
-    }
 #ifdef _DEBUG
     std::cout << "Found name:" << found_name << std::endl;
 #endif
@@ -41,7 +37,7 @@ bool ImportsUneraser::writeFoundDllName(IMAGE_IMPORT_DESCRIPTOR* lib_desc, std::
     return true;
 }
 
-bool ImportsUneraser::uneraseDllName(IMAGE_IMPORT_DESCRIPTOR* lib_desc, ImportedDllCoverage &dllCoverage)
+bool ImportsUneraser::uneraseDllName(IMAGE_IMPORT_DESCRIPTOR* lib_desc, const std::string &dll_name)
 {
     LPSTR name_ptr = nullptr;
     if (lib_desc->Name != 0) {
@@ -49,17 +45,17 @@ bool ImportsUneraser::uneraseDllName(IMAGE_IMPORT_DESCRIPTOR* lib_desc, Imported
     }
     if (name_ptr == nullptr || !validate_ptr(modulePtr, moduleSize, name_ptr, sizeof(char) * MIN_DLL_LEN)) {
         //try to get the cave:
-        DWORD cave_size = DWORD(dllCoverage.dllName.length() + 4 + 1 + 5); //extension + ending null + padding
+        DWORD cave_size = DWORD(dll_name.length() + 1 + 5); //ending null + padding
         PBYTE ptr = find_ending_cave(modulePtr, moduleSize, cave_size);
         if (ptr == nullptr) {
-            std::cerr << "Cannot save the DLL name: " << dllCoverage.dllName << std::endl;
+            std::cerr << "Cannot save the DLL name: " << dll_name << std::endl;
             return false;
         }
         DWORD cave_rva = static_cast<DWORD>(ptr - modulePtr);
         lib_desc->Name = cave_rva;
     }
 
-    if (writeFoundDllName(lib_desc, dllCoverage.dllName)) {
+    if (writeFoundDllName(lib_desc, dll_name)) {
         return true; // written the found name
     }
     return false;
@@ -141,7 +137,7 @@ bool ImportsUneraser::writeFoundFunction(IMAGE_THUNK_DATA_T* desc, const FIELD_T
 {
     if (foundFunc.isByOrdinal) {
         FIELD_T ordinal = foundFunc.funcOrdinal | ordinal_flag;
-        FIELD_T* by_ord = (FIELD_T*) &desc->u1.Ordinal;
+        FIELD_T* by_ord = (FIELD_T*) desc;
         *by_ord = ordinal;
 #ifdef _DEBUG
         std::cout << "[+] Saved ordinal" << std::endl;
@@ -150,11 +146,13 @@ bool ImportsUneraser::writeFoundFunction(IMAGE_THUNK_DATA_T* desc, const FIELD_T
     }
 
     PIMAGE_IMPORT_BY_NAME by_name = (PIMAGE_IMPORT_BY_NAME) ((ULONGLONG) modulePtr + desc->u1.AddressOfData);
+
     LPSTR func_name_ptr = reinterpret_cast<LPSTR>(by_name->Name);
     std::string found_name = foundFunc.funcName;
     bool is_nameptr_valid = validate_ptr(modulePtr, moduleSize, func_name_ptr, found_name.length());
     // try to save the found name under the pointer:
-    if (is_nameptr_valid == true) {
+    if (is_nameptr_valid) {
+        by_name->Hint = foundFunc.funcOrdinal;
         memcpy(func_name_ptr, found_name.c_str(), found_name.length() + 1); // with the ending '\0'
 #ifdef _DEBUG
         std::cout << "[+] Saved name" << std::endl;
@@ -182,34 +180,32 @@ bool ImportsUneraser::fillImportNames(IMAGE_IMPORT_DESCRIPTOR* lib_desc,
         thunk_addr = call_via;
     }
 
-    do {
-        LPVOID call_via_ptr = (LPVOID)((ULONGLONG)modulePtr + call_via);
-        if (call_via_ptr == NULL) break;
-
-        LPVOID thunk_ptr = (LPVOID)((ULONGLONG)modulePtr + thunk_addr);
-        if (thunk_ptr == NULL) break;
-
+    BYTE* call_via_ptr = (BYTE*)((ULONGLONG)modulePtr + call_via);
+    BYTE* thunk_ptr = (BYTE*)((ULONGLONG)modulePtr + thunk_addr);
+    for (;
+        call_via_ptr != NULL && thunk_ptr != NULL;
+        call_via_ptr += sizeof(FIELD_T), thunk_ptr += sizeof(FIELD_T)
+        )
+    {
         FIELD_T *thunk_val = (FIELD_T*)thunk_ptr;
         FIELD_T *call_via_val = (FIELD_T*)call_via_ptr;
         if (*call_via_val == 0) {
             //nothing to fill, probably the last record
             break;
         }
-
-        IMAGE_THUNK_DATA_T* desc = (IMAGE_THUNK_DATA_T*) thunk_ptr;
+        IMAGE_THUNK_DATA_T* desc = (IMAGE_THUNK_DATA_T*)thunk_ptr;
         if (desc->u1.Function == NULL) {
             break;
         }
-
         ULONGLONG searchedAddr = ULONGLONG(*call_via_val);
-        std::set<ExportedFunc>::iterator funcname_itr = addr_to_func[searchedAddr].begin();
-
-        if (addr_to_func[searchedAddr].begin() == addr_to_func[searchedAddr].end()) {
+        std::map<ULONGLONG,std::set<ExportedFunc>>::const_iterator found_itr = addr_to_func.find(searchedAddr);
+        if (found_itr == addr_to_func.end() || found_itr->second.size() == 0) {
+            //not found, move on
             std::cerr << "[-] Function not recovered: [" << std::hex << searchedAddr << "] " << std::endl;
-            call_via += sizeof(FIELD_T);
-            thunk_addr += sizeof(FIELD_T);
             continue;
         }
+        std::set<ExportedFunc>::const_iterator funcname_itr = found_itr->second.begin();
+        const peconv::ExportedFunc &foundFunc = *funcname_itr;
 
 #ifdef _DEBUG
         std::cout << "[*][" << std::hex << searchedAddr << "] " << funcname_itr->toString() << std::endl;
@@ -218,12 +214,9 @@ bool ImportsUneraser::fillImportNames(IMAGE_IMPORT_DESCRIPTOR* lib_desc,
         if (!is_name_saved) {
             is_name_saved = findNameInBinaryAndFill<FIELD_T>(lib_desc, call_via_ptr, thunk_ptr, ordinal_flag, addr_to_func);
         }
-        call_via += sizeof(FIELD_T);
-        thunk_addr += sizeof(FIELD_T);
         processed_imps++;
         if (is_name_saved) recovered_imps++;
-
-    } while (true);
+    }
 
     return (recovered_imps == processed_imps);
 }

@@ -1,5 +1,6 @@
 #include "peconv/fix_imports.h"
 #include "peconv/imports_uneraser.h"
+#include "peconv/file_util.h"
 
 #include <iostream>
 #include <algorithm>
@@ -7,7 +8,7 @@
 using namespace peconv;
 
 template <typename FIELD_T>
-size_t find_addresses_to_fill(FIELD_T call_via, FIELD_T thunk_addr, LPVOID modulePtr, size_t moduleSize, OUT std::set<ULONGLONG> &addresses)
+size_t find_addresses_to_fill(FIELD_T call_via, FIELD_T thunk_addr, LPVOID modulePtr, size_t moduleSize, IN const peconv::ExportsMapper& exportsMap, OUT std::set<ULONGLONG> &addresses)
 {
     size_t addrCounter = 0;
     do {
@@ -29,9 +30,12 @@ size_t find_addresses_to_fill(FIELD_T call_via, FIELD_T thunk_addr, LPVOID modul
             //nothing to fill, probably the last record
             break;
         }
+       
         ULONGLONG searchedAddr = ULONGLONG(*call_via_val);
-        addresses.insert(searchedAddr);
-        addrCounter++;
+        if (exportsMap.find_export_by_va(searchedAddr) != nullptr) {
+            addresses.insert(searchedAddr);
+            addrCounter++;
+        }
         //---
         call_via += sizeof(FIELD_T);
         thunk_addr += sizeof(FIELD_T);
@@ -40,64 +44,80 @@ size_t find_addresses_to_fill(FIELD_T call_via, FIELD_T thunk_addr, LPVOID modul
     return addrCounter;
 }
 
-//find the name of the DLL that can cover all the addresses of imported functions
-std::string find_covering_dll(std::set<ULONGLONG> &addresses, peconv::ExportsMapper& exportsMap)
+std::set<std::string> get_all_dlls_exporting_function(ULONGLONG func_addr, const peconv::ExportsMapper& exportsMap)
 {
-    std::set<std::string> dllNames;
+    std::set<std::string> currDllNames;
+    //1. Get all the functions from all accessible DLLs that correspond to this address:
+    const std::set<ExportedFunc>* exports_for_va = exportsMap.find_exports_by_va(func_addr);
+    if (!exports_for_va) {
+        std::cerr << "Cannot find any DLL exporting: " << std::hex << func_addr << std::endl;
+        return currDllNames; //empty
+    }
+    //2. Iterate through their DLL names and add them to a set:
+    for (std::set<ExportedFunc>::iterator strItr = exports_for_va->begin();
+        strItr != exports_for_va->end();
+        strItr++)
+    {
+        currDllNames.insert(strItr->libName);
+    }
+    return currDllNames;
+}
+
+std::set<std::string> get_dlls_intersection(const std::set<std::string> &dllNames, const std::set<std::string> &currDllNames)
+{
+    std::set<std::string> resultSet;
+    std::set_intersection(dllNames.begin(), dllNames.end(),
+        currDllNames.begin(), currDllNames.end(),
+        std::inserter(resultSet, resultSet.begin())
+    );
+    return resultSet;
+}
+
+//find the name of the DLL that can cover all the addresses of imported functions
+std::string find_covering_dll(std::set<ULONGLONG> &addresses, const peconv::ExportsMapper& exportsMap)
+{
+    std::set<std::string> mainDllsSet;
+    std::set<std::string> reserveDllSet;
     bool isFresh = true;
 
+    // the earliest addresses are more significant for the final decision on what DLL to choose
+    // so, they should be processed at the end
     std::set<ULONGLONG>::iterator addrItr;
+
     for (addrItr = addresses.begin(); addrItr != addresses.end(); addrItr++) {
         ULONGLONG searchedAddr = *addrItr;
         //---
-        // Find all the DLLs exporting this particular function (can be forwarded etc)
-        //1. Get all the functions from all accessible DLLs that correspond to this address:
-        const std::set<ExportedFunc>* exports_for_va = exportsMap.find_exports_by_va(searchedAddr);
-        if (exports_for_va == nullptr) {
-            std::cerr << "Cannot find any DLL exporting: " << std::hex << searchedAddr << std::endl;
-            return "";
-        }
-        //2. Iterate through their DLL names and add them to a set:
-        std::set<std::string> currDllNames;
-        for (std::set<ExportedFunc>::iterator strItr = exports_for_va->begin(); 
-            strItr != exports_for_va->end(); 
-            strItr++)
-        {
-            currDllNames.insert(strItr->libName);
-        }
-        //3. Which of those DLLs covers also previous functions from this series?
+        // 1. Find all the DLLs exporting this particular function (can be forwarded etc)
+        std::set<std::string> currDllNames = get_all_dlls_exporting_function(searchedAddr, exportsMap);
+
+        //2. Which of those DLLs covers also previous functions from this series?
         if (isFresh) {
             //if no other function was processed before, set the current DLL set as the total set
-            dllNames = currDllNames;
+            mainDllsSet = currDllNames;
             isFresh = false;
             continue;
         }
         // find the intersection between the total set and the current set
-        std::set<std::string> resultSet;
-        std::set_intersection(dllNames.begin(), dllNames.end(),
-            currDllNames.begin(), currDllNames.end(),
-            std::inserter(resultSet, resultSet.begin())
-        );
-        //std::cout << "ResultSet size: " << resultSet.size() << std::endl;
-        
-        if (resultSet.size() == 0) {
-#ifdef _DEBUG
-            std::cerr << "Suspicious address: " << std::hex << searchedAddr << " not found in the currently processed DLL"  << std::endl;
-            std::string prev_lib = *(dllNames.begin());
-            std::cerr << "Not found in: " << prev_lib << std::endl;
-
-            std::string curr_lib = *(currDllNames.begin());
-            std::cerr << "Found in: " << curr_lib << std::endl;
-#endif
-            //reinitializate the set and keep going...
-            dllNames = currDllNames;
+        std::set<std::string> resultSet = get_dlls_intersection(mainDllsSet, currDllNames);
+        if (resultSet.size() > 0) {
+            //found intersection, overwrite the main set
+            mainDllsSet = resultSet;
             continue;
         }
-        dllNames = resultSet;
-        //---
+        // if no intersection found in the main set, check if there is any in the reserved set:
+        resultSet = get_dlls_intersection(reserveDllSet, currDllNames);
+        if (resultSet.size() > 0) {
+            //found intersection, overwrite the main set
+            reserveDllSet = mainDllsSet; // move the current to the reserve
+            mainDllsSet = resultSet;
+            continue;
+        }
+        // no intersection found with any of the sets:
+        reserveDllSet = currDllNames; //set is as a reserved DLL: to be used if it will reoccur
     }
-    if (dllNames.size() > 0) {
-        return *(dllNames.begin());
+    if (mainDllsSet.size() > 0) {
+        const std::string main_dll = *(mainDllsSet.begin());
+        return main_dll;
     }
     return "";
 }
@@ -117,13 +137,13 @@ bool ImportedDllCoverage::findCoveringDll()
 }
 
 size_t map_addresses_to_functions(std::set<ULONGLONG> &addresses, 
-                               std::string chosenDll,
-                               peconv::ExportsMapper& exportsMap,
-                               OUT std::map<ULONGLONG, std::set<ExportedFunc>> &addr_to_func,
-                               OUT std::set<ULONGLONG> &not_found
-                               )
+    IN const std::string &chosenDll,
+    IN const peconv::ExportsMapper& exportsMap,
+    OUT std::map<ULONGLONG, std::set<ExportedFunc>> &addr_to_func,
+    OUT std::set<ULONGLONG> &not_found
+)
 {
-    size_t coveredCount = 0;
+    std::set<ULONGLONG> coveredAddresses;
     std::set<ULONGLONG>::iterator addrItr;
     for (addrItr = addresses.begin(); addrItr != addresses.end(); addrItr++) {
 
@@ -150,7 +170,7 @@ size_t map_addresses_to_functions(std::set<ULONGLONG> &addresses,
             }
             ExportedFunc func = *strItr;
             addr_to_func[searchedAddr].insert(func);
-            coveredCount++;
+            coveredAddresses.insert(searchedAddr);
         }
         if (addr_to_func.find(searchedAddr) == addr_to_func.end()) {
             const ExportedFunc* func = exportsMap.find_export_by_va(searchedAddr);
@@ -160,10 +180,10 @@ size_t map_addresses_to_functions(std::set<ULONGLONG> &addresses,
 #endif
         }
     }
-    return coveredCount;
+    return coveredAddresses.size();
 }
 
-size_t ImportedDllCoverage::mapAddressesToFunctions(std::string dll)
+size_t ImportedDllCoverage::mapAddressesToFunctions(const std::string &dll)
 {
     //reset all stored info:
     this->mappedDllName = dll;
@@ -172,18 +192,19 @@ size_t ImportedDllCoverage::mapAddressesToFunctions(std::string dll)
     }
     this->notFound.clear();
 
-    size_t coveredCount = map_addresses_to_functions(this->addresses, dll, this->exportsMap, this->addrToFunc, this->notFound); 
-    if (notFound.size()) {
-        std::cerr << "[-] Not all addresses are covered! Not found: " << std::dec << notFound.size() << std::endl;
-    } else {
+    const size_t coveredCount = map_addresses_to_functions(this->addresses, dll, this->exportsMap, this->addrToFunc, this->notFound);
 #ifdef _DEBUG
+    if (notFound.size()) {
+        std::cout << "[-] Not all addresses are covered! Not found: " << std::dec << notFound.size() << std::endl;
+    } else {
+
         std::cout << "All covered!" << std::endl;
-#endif
     }
+#endif
     return coveredCount;
 }
 
-bool peconv::fix_imports(PVOID modulePtr, size_t moduleSize, peconv::ExportsMapper& exportsMap)
+bool peconv::fix_imports(PVOID modulePtr, size_t moduleSize, const peconv::ExportsMapper& exportsMap)
 {
     bool skip_bound = false; // skip boud imports?
     IMAGE_DATA_DIRECTORY *importsDir = peconv::get_directory_entry((const BYTE*) modulePtr, IMAGE_DIRECTORY_ENTRY_IMPORT);
@@ -231,15 +252,15 @@ bool peconv::fix_imports(PVOID modulePtr, size_t moduleSize, peconv::ExportsMapp
         DWORD thunk_addr = lib_desc->OriginalFirstThunk; // warning: it can be NULL!
         std::set<ULONGLONG> addresses;
         if (!is64) {
-            find_addresses_to_fill<DWORD>(call_via, thunk_addr, modulePtr, moduleSize, addresses);
+            find_addresses_to_fill<DWORD>(call_via, thunk_addr, modulePtr, moduleSize, exportsMap, addresses);
         } else {
-            find_addresses_to_fill<ULONGLONG>(call_via, thunk_addr, modulePtr, moduleSize, addresses);
+            find_addresses_to_fill<ULONGLONG>(call_via, thunk_addr, modulePtr, moduleSize, exportsMap, addresses);
         }
         ImportedDllCoverage dllCoverage(addresses, exportsMap);
         bool is_all_covered = dllCoverage.findCoveringDll();
         bool is_lib_erased = false;
 
-        lib_name = get_dll_name(lib_name); //without extension
+        lib_name = get_dll_shortname(lib_name); //without extension
 
         if (lib_name.length() == 0) {
             is_lib_erased = true;
@@ -265,7 +286,8 @@ bool peconv::fix_imports(PVOID modulePtr, size_t moduleSize, peconv::ExportsMapp
             return false;
         }
         if (is_lib_erased) {
-            impUneraser.uneraseDllName(lib_desc, dllCoverage);
+            const std::string dll_with_ext = exportsMap.get_dll_fullname(dllCoverage.dllName);
+            impUneraser.uneraseDllName(lib_desc, dll_with_ext);
         }
     }
 #ifdef _DEBUG

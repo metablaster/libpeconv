@@ -14,7 +14,7 @@ bool sections_virtual_to_raw(BYTE* payload, SIZE_T payload_size, OUT BYTE* destA
 
     bool is64b = is64bit(payload);
 
-    BYTE* payload_nt_hdr = get_nt_hrds(payload);
+    BYTE* payload_nt_hdr = get_nt_hdrs(payload);
     if (payload_nt_hdr == NULL) {
         std::cerr << "Invalid payload: " << std::hex << (ULONGLONG) payload << std::endl;
         return false;
@@ -34,16 +34,12 @@ bool sections_virtual_to_raw(BYTE* payload, SIZE_T payload_size, OUT BYTE* destA
         hdrsSize = payload_nt_hdr32->OptionalHeader.SizeOfHeaders;
         secptr = (LPVOID)((ULONGLONG)&(payload_nt_hdr32->OptionalHeader) + fileHdr->SizeOfOptionalHeader);
     }
-    if (!validate_ptr(payload, payload_size, payload, hdrsSize)) {
-        return false;
-    }
-    //copy payload's headers:
-    memcpy(destAddress, payload, hdrsSize);
 
     //copy all the sections, one by one:
 #ifdef _DEBUG
     std::cout << "Coping sections:" << std::endl;
 #endif
+    DWORD first_raw = 0;
     SIZE_T raw_end = hdrsSize;
     for (WORD i = 0; i < fileHdr->NumberOfSections; i++) {
         PIMAGE_SECTION_HEADER next_sec = (PIMAGE_SECTION_HEADER)((ULONGLONG)secptr + (IMAGE_SIZEOF_SECTION_HEADER * i));
@@ -58,10 +54,10 @@ bool sections_virtual_to_raw(BYTE* payload, SIZE_T payload_size, OUT BYTE* destA
         size_t new_end = sec_size + next_sec->PointerToRawData;
         if (new_end > raw_end) raw_end = new_end;
 
-        if (next_sec->VirtualAddress + sec_size > payload_size) {
+        if ((next_sec->VirtualAddress + sec_size) > payload_size) {
             std::cerr << "[!] Virtual section size is out ouf bounds: " << std::hex << sec_size << std::endl;
-            sec_size = SIZE_T(payload_size - next_sec->VirtualAddress);
-            std::cerr << "[!] Truncated to maximal size: " << std::hex <<  sec_size << std::endl;
+            sec_size = (payload_size > next_sec->VirtualAddress) ? SIZE_T(payload_size - next_sec->VirtualAddress) : 0;
+            std::cerr << "[!] Truncated to maximal size: " << std::hex << sec_size << ", buffer size: " << payload_size << std::endl;
         }
         if (next_sec->VirtualAddress > payload_size && sec_size != 0) {
             std::cerr << "[-] VirtualAddress of section is out ouf bounds: " << std::hex << next_sec->VirtualAddress << std::endl;
@@ -85,15 +81,36 @@ bool sections_virtual_to_raw(BYTE* payload, SIZE_T payload_size, OUT BYTE* destA
             continue;
         }
         memcpy(section_raw_ptr, section_mapped, sec_size);
+        if (first_raw == 0 || (first_raw != 0 && next_sec->PointerToRawData < first_raw)) {
+            first_raw = next_sec->PointerToRawData;
+        }
     }
     if (raw_end > payload_size) raw_end = payload_size;
     if (raw_size_ptr != NULL) {
         (*raw_size_ptr) = raw_end;
     }
+
+    //copy payload's headers:
+    if (hdrsSize == 0) {
+        hdrsSize = first_raw;
+#ifdef _DEBUG
+        std::cout << "hdrsSize not filled, using calculated size: " << std::hex << hdrsSize << "\n";
+#endif
+    }
+    if (!validate_ptr(payload, payload_size, payload, hdrsSize)) {
+        return false;
+    }
+    memcpy(destAddress, payload, hdrsSize);
     return true;
 }
 
-BYTE* peconv::pe_virtual_to_raw(BYTE* payload, size_t in_size, ULONGLONG loadBase, size_t &out_size, bool rebuffer)
+BYTE* peconv::pe_virtual_to_raw(
+    IN BYTE* payload,
+    IN size_t in_size,
+    IN ULONGLONG loadBase,
+    OUT size_t &out_size,
+    IN OPTIONAL bool rebuffer
+)
 {
     BYTE* in_buf = payload;
     if (rebuffer) {
@@ -136,7 +153,12 @@ BYTE* peconv::pe_virtual_to_raw(BYTE* payload, size_t in_size, ULONGLONG loadBas
     return out_buf;
 }
 
-BYTE* peconv::pe_realign_raw_to_virtual(const BYTE* payload, size_t in_size, ULONGLONG loadBase, size_t &out_size)
+BYTE* peconv::pe_realign_raw_to_virtual(
+    IN const BYTE* payload,
+    IN size_t in_size,
+    IN ULONGLONG loadBase,
+    OUT size_t &out_size
+)
 {
     BYTE* out_buf = (BYTE*)alloc_pe_buffer(in_size, PAGE_READWRITE);
     if (!out_buf) return nullptr;

@@ -11,15 +11,16 @@ bool peconv::validate_ptr(IN const void* buffer_bgn, IN SIZE_T buffer_size, IN c
     if (buffer_bgn == nullptr || field_bgn == nullptr) {
         return false;
     }
-    ULONGLONG start = (ULONGLONG)buffer_bgn;
-    ULONGLONG end = start + buffer_size;
+    BYTE* _start = (BYTE*)buffer_bgn;
+    BYTE* _end = _start + buffer_size;
 
-    ULONGLONG field_end = (ULONGLONG)field_bgn + field_size;
+    BYTE* _field_start = (BYTE*)field_bgn;
+    BYTE* _field_end = (BYTE*)field_bgn + field_size;
 
-    if ((ULONGLONG)field_bgn < start) {
+    if (_field_start < _start) {
         return false;
     }
-    if (field_end > end) {
+    if (_field_end > _end) {
         return false;
     }
     return true;
@@ -33,7 +34,7 @@ bool peconv::validate_ptr(IN const void* buffer_bgn, IN SIZE_T buffer_size, IN c
 //allocates a buffer that does not have to start from the beginning of the section
 peconv::UNALIGNED_BUF peconv::alloc_unaligned(size_t buf_size)
 {
-    PBYTE buf = (PBYTE) calloc(buf_size, sizeof(BYTE));
+    UNALIGNED_BUF buf = (UNALIGNED_BUF) calloc(buf_size, sizeof(BYTE));
     return buf;
 }
 
@@ -48,7 +49,7 @@ void peconv::free_unaligned(peconv::UNALIGNED_BUF section_buffer)
 
 peconv::ALIGNED_BUF peconv::alloc_aligned(size_t buffer_size, DWORD protect, ULONGLONG desired_base)
 {
-    PBYTE buf = (PBYTE) VirtualAlloc((LPVOID) desired_base, buffer_size, MEM_COMMIT | MEM_RESERVE, protect);
+    ALIGNED_BUF buf = (ALIGNED_BUF) VirtualAlloc((LPVOID) desired_base, buffer_size, MEM_COMMIT | MEM_RESERVE, protect);
     return buf;
 }
 
@@ -75,22 +76,9 @@ peconv::ALIGNED_BUF peconv::alloc_pe_buffer(size_t buffer_size, DWORD protect, U
     return alloc_aligned(buffer_size, protect, desired_base);
 }
 
-
 // Free loaded PE module
 bool peconv::free_pe_buffer(peconv::ALIGNED_BUF buffer, size_t buffer_size)
 {
     return peconv::free_aligned(buffer, buffer_size);
-}
-
-// allocate a buffer for PE section:
-
-peconv::UNALIGNED_BUF peconv::alloc_pe_section(size_t buf_size)
-{
-    return peconv::alloc_unaligned(buf_size);
-}
-
-void peconv::free_pe_section(peconv::UNALIGNED_BUF section_buffer)
-{
-    return peconv::free_unaligned(section_buffer);
 }
 

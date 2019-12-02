@@ -1,3 +1,8 @@
+/**
+* @file
+* @brief   Master include file, including everything else.
+*/
+
 #pragma once
 
 #include "peconv/buffer_util.h"
@@ -19,3 +24,4 @@
 #include "peconv/fix_imports.h"
 #include "peconv/delayed_imports_loader.h"
 #include "peconv/resource_parser.h"
+#include "peconv/load_config_util.h"

@@ -29,6 +29,7 @@ set (srcs
 	src/file_util.cpp
 	src/resource_util.cpp
 	src/imports_uneraser.cpp
+	src/load_config_util.cpp
 	src/caves.cpp
 	src/util.cpp
 )
@@ -57,7 +58,20 @@ set (hdrs
 	include/peconv/file_util.h
 	include/peconv/resource_util.h
 	include/peconv/imports_uneraser.h
+	include/peconv/load_config_util.h
+	include/peconv/load_config_defs.h
 	include/peconv/caves.h
 )
 
 add_library ( ${PROJECT_NAME} STATIC ${hdrs} ${srcs} )
+
+if(PECONV_LIB_INSTALL)
+	include(GNUInstallDirs)
+
+	install(TARGETS ${PROJECT_NAME}
+		ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+		LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+		RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+	
+	install(DIRECTORY "include/" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+endif()

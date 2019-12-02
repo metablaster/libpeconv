@@ -14,7 +14,7 @@ bool sections_raw_to_virtual(IN const BYTE* payload, IN SIZE_T payloadSize, OUT 
 
     bool is64b = is64bit(payload);
 
-    BYTE* payload_nt_hdr = get_nt_hrds(payload);
+    BYTE* payload_nt_hdr = get_nt_hdrs(payload);
     if (payload_nt_hdr == NULL) {
         std::cerr << "Invalid payload: " << std::hex << (ULONGLONG) payload << std::endl;
         return false;
@@ -35,12 +35,8 @@ bool sections_raw_to_virtual(IN const BYTE* payload, IN SIZE_T payloadSize, OUT 
         hdrsSize = payload_nt_hdr32->OptionalHeader.SizeOfHeaders;
         secptr = (LPVOID)((ULONGLONG)&(payload_nt_hdr32->OptionalHeader) + fileHdr->SizeOfOptionalHeader);
     }
-    if (!validate_ptr((const LPVOID) payload, destBufferSize, (const LPVOID) payload, hdrsSize)) {
-        return false;
-    }
-    //copy payload's headers:
-    memcpy(destBuffer, payload, hdrsSize);
 
+    DWORD first_raw = 0;
     //copy all the sections, one by one:
     SIZE_T raw_end = 0;
     for (WORD i = 0; i < fileHdr->NumberOfSections; i++) {
@@ -56,10 +52,10 @@ bool sections_raw_to_virtual(IN const BYTE* payload, IN SIZE_T payloadSize, OUT 
         SIZE_T sec_size = next_sec->SizeOfRawData;
         raw_end = next_sec->SizeOfRawData + next_sec->PointerToRawData;
         
-        if (next_sec->VirtualAddress + sec_size > destBufferSize) {
+        if ((next_sec->VirtualAddress + sec_size) > destBufferSize) {
             std::cerr << "[!] Virtual section size is out ouf bounds: " << std::hex << sec_size << std::endl;
-            sec_size = SIZE_T(destBufferSize - next_sec->VirtualAddress);
-            std::cerr << "[!] Truncated to maximal size: " << std::hex << sec_size << std::endl;
+            sec_size = (destBufferSize > next_sec->VirtualAddress) ? SIZE_T(destBufferSize - next_sec->VirtualAddress) : 0;
+            std::cerr << "[!] Truncated to maximal size: " << std::hex << sec_size << ", buffer size:" << destBufferSize << std::endl;
         }
         if (next_sec->VirtualAddress >= destBufferSize && sec_size != 0) {
             std::cerr << "[-] VirtualAddress of section is out ouf bounds: " << std::hex << next_sec->VirtualAddress << std::endl;
@@ -80,7 +76,22 @@ bool sections_raw_to_virtual(IN const BYTE* payload, IN SIZE_T payloadSize, OUT 
             continue;
         }
         memcpy(section_mapped, section_raw_ptr, sec_size);
+        if (first_raw == 0 || (first_raw != 0 && next_sec->PointerToRawData < first_raw)) {
+            first_raw = next_sec->PointerToRawData;
+        }
     }
+
+    //copy payload's headers:
+    if (hdrsSize == 0) {
+        hdrsSize= first_raw;
+#ifdef _DEBUG
+        std::cout << "hdrsSize not filled, using calculated size: " << std::hex << hdrsSize << "\n";
+#endif
+    }
+    if (!validate_ptr((const LPVOID)payload, destBufferSize, (const LPVOID)payload, hdrsSize)) {
+        return false;
+    }
+    memcpy(destBuffer, payload, hdrsSize);
     return true;
 }
 
@@ -93,30 +104,23 @@ BYTE* peconv::pe_raw_to_virtual(
 )
 {
     //check payload:
-    BYTE* nt_hdr = get_nt_hrds(payload);
+    BYTE* nt_hdr = get_nt_hdrs(payload);
     if (nt_hdr == NULL) {
         std::cerr << "Invalid payload: " << std::hex << (ULONGLONG) payload << std::endl;
         return nullptr;
     }
-    ULONGLONG oldImageBase = 0;
     DWORD payloadImageSize = 0;
-    ULONGLONG entryPoint = 0;
 
     bool is64 = is64bit(payload);
     if (is64) {
         IMAGE_NT_HEADERS64* payload_nt_hdr = (IMAGE_NT_HEADERS64*)nt_hdr;
-        oldImageBase = payload_nt_hdr->OptionalHeader.ImageBase;
         payloadImageSize = payload_nt_hdr->OptionalHeader.SizeOfImage;
-        entryPoint = payload_nt_hdr->OptionalHeader.AddressOfEntryPoint;
     }
     else {
         IMAGE_NT_HEADERS32* payload_nt_hdr = (IMAGE_NT_HEADERS32*)nt_hdr;
-        oldImageBase = payload_nt_hdr->OptionalHeader.ImageBase;
         payloadImageSize = payload_nt_hdr->OptionalHeader.SizeOfImage;
-        entryPoint = payload_nt_hdr->OptionalHeader.AddressOfEntryPoint;
     }
 
-    SIZE_T written = 0;
     DWORD protect = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
 
     //first we will prepare the payload image in the local memory, so that it will be easier to edit it, apply relocations etc.

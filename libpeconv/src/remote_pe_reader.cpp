@@ -34,6 +34,18 @@ size_t peconv::fetch_region_size(HANDLE processHandle, BYTE* moduleBase)
     return area_size;
 }
 
+ULONGLONG peconv::fetch_alloc_base(HANDLE processHandle, BYTE* moduleBase)
+{
+    MEMORY_BASIC_INFORMATION page_info = { 0 };
+    if (!peconv::fetch_region_info(processHandle, moduleBase, page_info)) {
+        return 0;
+    }
+    if (page_info.Type == 0) {
+        return 0; //invalid type, skip it
+    }
+    return (ULONGLONG) page_info.AllocationBase;
+}
+
 size_t peconv::read_remote_memory(HANDLE processHandle, BYTE *start_addr, OUT BYTE* buffer, const size_t buffer_size, const SIZE_T step_size)
 {
     if (buffer == nullptr) {
@@ -47,7 +59,7 @@ size_t peconv::read_remote_memory(HANDLE processHandle, BYTE *start_addr, OUT BY
     while (to_read_size > 0) {
         BOOL is_ok = ReadProcessMemory(processHandle, start_addr, buffer, to_read_size, &read_size);
         if (!is_ok) {
-            if (last_error != 0 && read_size == 0) {
+            if (read_size == 0 && (last_error != 0 && last_error != ERROR_PARTIAL_COPY)) {
                 break; // no progress, break
             }
             last_error = GetLastError();
@@ -121,7 +133,7 @@ bool peconv::read_remote_pe_header(HANDLE processHandle, BYTE *start_addr, OUT B
     if (read_size == 0) {
         return false;
     }
-    BYTE *nt_ptr = get_nt_hrds(buffer);
+    BYTE *nt_ptr = get_nt_hdrs(buffer);
     if (nt_ptr == nullptr) {
         return false;
     }
@@ -141,7 +153,7 @@ bool peconv::read_remote_pe_header(HANDLE processHandle, BYTE *start_addr, OUT B
     return true;
 }
 
-BYTE* peconv::get_remote_pe_section(HANDLE processHandle, BYTE *start_addr, const size_t section_num, OUT size_t &section_size)
+peconv::UNALIGNED_BUF peconv::get_remote_pe_section(HANDLE processHandle, BYTE *start_addr, const size_t section_num, OUT size_t &section_size)
 {
     BYTE header_buffer[MAX_HEADER_SIZE] = { 0 };
 
@@ -153,13 +165,13 @@ BYTE* peconv::get_remote_pe_section(HANDLE processHandle, BYTE *start_addr, cons
         return NULL;
     }
     size_t buffer_size = section_hdr->Misc.VirtualSize;
-    BYTE *module_code = peconv::alloc_pe_section(buffer_size);
+    UNALIGNED_BUF module_code = peconv::alloc_unaligned(buffer_size);
     if (module_code == NULL) {
         return NULL;
     }
     size_t read_size = read_remote_memory(processHandle, start_addr + section_hdr->VirtualAddress, module_code, buffer_size);
     if (read_size == 0) {
-        peconv::free_pe_section(module_code);
+        peconv::free_unaligned(module_code);
         return NULL;
     }
     section_size = buffer_size;
@@ -230,7 +242,7 @@ size_t peconv::read_remote_pe(const HANDLE processHandle, BYTE *start_addr, cons
     return read_size;
 }
 
-DWORD peconv::get_remote_image_size(const HANDLE processHandle, BYTE *start_addr)
+DWORD peconv::get_remote_image_size(IN const HANDLE processHandle, IN BYTE *start_addr)
 {
     BYTE hdr_buffer[MAX_HEADER_SIZE] = { 0 };
     if (!read_remote_pe_header(processHandle, start_addr, hdr_buffer, MAX_HEADER_SIZE)) {
@@ -239,7 +251,11 @@ DWORD peconv::get_remote_image_size(const HANDLE processHandle, BYTE *start_addr
     return peconv::get_image_size(hdr_buffer);
 }
 
-bool peconv::dump_remote_pe(const char *out_path, const HANDLE processHandle, BYTE* start_addr, t_pe_dump_mode &dump_mode, peconv::ExportsMapper* exportsMap)
+bool peconv::dump_remote_pe(IN const char *out_path, 
+    IN const HANDLE processHandle, 
+    IN BYTE* start_addr, 
+    IN OUT t_pe_dump_mode &dump_mode, 
+    IN OPTIONAL peconv::ExportsMapper* exportsMap)
 {
     DWORD mod_size = get_remote_image_size(processHandle, start_addr);
 #ifdef _DEBUG
@@ -254,9 +270,9 @@ bool peconv::dump_remote_pe(const char *out_path, const HANDLE processHandle, BY
         std::cerr << "[-] Failed allocating buffer. Error: " << GetLastError() << std::endl;
         return false;
     }
-    size_t read_size = 0;
     //read the module that it mapped in the remote process:
-    if ((read_size = read_remote_pe(processHandle, start_addr, mod_size, buffer, mod_size)) == 0) {
+    const size_t read_size = read_remote_pe(processHandle, start_addr, mod_size, buffer, mod_size);
+    if (read_size == 0) {
         std::cerr << "[-] Failed reading module. Error: " << GetLastError() << std::endl;
         peconv::free_pe_buffer(buffer, mod_size);
         buffer = nullptr;
